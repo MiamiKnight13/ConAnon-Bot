@@ -22,11 +22,31 @@ namespace Vokson2
     {
         long SupportId = 1369750317;
         TelegramBotClient bot;
+
         public Dictionary<long, UserState> _states = new();
+
+        private Queue<long> _waitingForCompanion = new Queue<long>(); 
+        private object _queueLock = new object(); 
+
+        InlineKeyboardButton[] row1 = new[]
+                    {
+                    InlineKeyboardButton.WithCallbackData("Anon conversation🔎", "user_anoncon"),
+                };
+        InlineKeyboardButton[] row2 = new[]
+        {
+                    InlineKeyboardButton.WithCallbackData("Anon message📩", "user_anonmes")
+                };
+        InlineKeyboardButton[] row3 = new[]
+        {
+                    InlineKeyboardButton.WithCallbackData("Anon spam📈", "user_anonspam")
+                };
+
+        InlineKeyboardMarkup keyboard;
 
         public Host(string token)
         {
             bot = new TelegramBotClient(token);
+            keyboard = new InlineKeyboardMarkup(new[] { row1, row2, row3 });
         }
 
         public void Start()
@@ -59,7 +79,8 @@ namespace Vokson2
             {
                 state = new UserState();
                 _states[chatId] = state;
-                state.UserName =  message?.From?.Username ?? update.CallbackQuery?.From.Username ?? "nousername";
+                state.UserName = message?.From?.Username ?? update.CallbackQuery?.From.Username ?? "nousername";
+                state.Id = chatId;
 
                 Console.WriteLine($"new user: @{state.UserName}");
             }
@@ -67,14 +88,17 @@ namespace Vokson2
             if(message != null && state.inDialog)
             {
                 await DialogHandler(chatId, message, state);
+                return;
             }
             else if (update.CallbackQuery != null)
             {
                 await CallBackQueryHandler(chatId, update.CallbackQuery, state);
+                return;
             }
             else if (message.Text != null)
             {
                 await TextMessageHandler(chatId, message, state);
+                return;
             }
         }
 
@@ -82,12 +106,12 @@ namespace Vokson2
         {
             var text = message.Text;
 
-            if(text != null && state.isWritingSupport)
+            if (text == "/leave")
             {
-                await bot.SendMessage(SupportId, $"new support message from @{message.From?.Username}:\n{text}");
-                await bot.SendMessage(chatId, $"You have just sent '{text}' to support");
-                state.isWritingSupport = false;
+                await LeaveConversationAsync(chatId, state);
+                return;
             }
+
 
             if(text == "/start")
             {
@@ -105,10 +129,52 @@ namespace Vokson2
                     InlineKeyboardButton.WithUrl("My Git Hub", "https://github.com/MiamiKnight13")
                 };
 
-                var keyboard = new InlineKeyboardMarkup(new[] { row1, row2, row3 });
+                var _keyboard = new InlineKeyboardMarkup(new[] { row1, row2, row3 });
 
-                await bot.SendMessage(chatId, "*Hi there*! 🛠📚", replyMarkup: keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                await bot.SendMessage(chatId, "*Hi there*! 🛠📚", replyMarkup: _keyboard, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                return;
 
+            }
+            else if (text == "/stop")
+            {
+                state.isSpamming = false;
+                state.IdToSpam = default;
+                state.UsernameToSpam = default;
+                await bot.SendMessage(chatId, "You have just stopped the spamming", replyMarkup: keyboard);
+                return;
+            }
+            else if (text == "/exit")
+            {
+                if (state.inDialog)
+                {
+                    state.inDialog = false;
+                    state.Step = 0;
+                    state.IdToMessage = 0;
+                    state.UsernameToMessage = null;
+                    state.isFirst = false;
+
+                    await bot.SendMessage(chatId, "You have ended the conversation", replyMarkup: keyboard);
+                    return;
+                }
+                else
+                {
+                    await bot.SendMessage(chatId, "There are no pending conversations right now");
+                    return;
+                }
+            }
+
+            if (text != null && state.isWritingSupport)
+            {
+                await bot.SendMessage(SupportId, $"new support message from *@{message.From?.Username}*:\n*{text}*", parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                await bot.SendMessage(chatId, $"You have just sent *'{text}'* to support", parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                state.isWritingSupport = false;
+                return;
+            }
+
+            if (state.isChating && text != null)
+            {
+                await bot.SendMessage(state.CompanionId, text);
+                return;
             }
         }
         private async Task CallBackQueryHandler(long chatId, CallbackQuery callbackQuery, UserState state)
@@ -119,40 +185,38 @@ namespace Vokson2
             {
                 if (data == "user_mainmenu")
                 {
-                    var row1 = new[]
-                    {
-                    InlineKeyboardButton.WithCallbackData("Anon conversation🔎", "user_anoncon"),
-                };
-                    var row2 = new[]
-                    {
-                    InlineKeyboardButton.WithCallbackData("Anon message📩", "user_anonmes")
-                };
-                    var row3 = new[]
-                    {
-                    InlineKeyboardButton.WithCallbackData("Anon spam📈", "user_anonspam")
-                };
-
-                    var keyboard = new InlineKeyboardMarkup(new[] { row1, row2, row3 });
-
                     await bot.SendMessage(chatId, "Main menu⚙", replyMarkup: keyboard);
                 }
                 else if (data == "user_listofusers")
                 {
-                    var str = "List of bot users📃";
+                    var str = "*List of bot users📃*";
                     foreach (var st in _states)
                     {
                         str += $"\n - @{st.Value.UserName}";
                     }
-                    await bot.SendMessage(chatId, str);
+                    await bot.SendMessage(chatId, str, parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
                 }
                 else if(data == "user_support")
                 {
                     await bot.SendMessage(chatId, "Your next message will be sent to support✅");
                     state.isWritingSupport = true;
                 }
-                else if(data == "user_anoncon")
+                else if (data == "user_anoncon")
                 {
+                    if (state.isLookingCon)
+                    {
+                        await bot.SendMessage(chatId, "We are already looking for a companion!");
+                        return;
+                    }
+                    if (state.isChating)
+                    {
+                        await bot.SendMessage(chatId, "You are already in a conversation");
+                        return;
+                    }
 
+                    await bot.SendChatAction(chatId, Telegram.Bot.Types.Enums.ChatAction.Typing); 
+
+                    await FindCompanion(chatId, state);
                 }
                 else if(data == "user_anonmes")
                 {
@@ -167,63 +231,107 @@ namespace Vokson2
                     state.Step = 3;
                 }
             }
-        }
-        private async Task DialogHandler(long chatId, Message message, UserState state)
-        {
-            var text = message.Text;
-
-            if(text == "/exit")
+            else if (data == "leave_chat_button")
             {
-                if(state.inDialog)
+                await LeaveConversationAsync(chatId, state);
+            }
+        }
+
+        private async Task FindCompanion(long searchingChatId, UserState searchingState)
+        {
+            long? foundCompanionChatId = null; 
+            UserState foundCompanionState = null;
+
+            bool foundPair = false; 
+
+            lock (_queueLock)
+            {
+                if (_waitingForCompanion.Count > 0)
                 {
-                    state.inDialog = false;
-                    state.Step = 0;
-                    state.IdToMessage = 0;
-                    state.UsernameToMessage = null;
-                    state.isFirst = false;
-
-                    var row1 = new[]
-                    {
-                    InlineKeyboardButton.WithCallbackData("Anon conversation🔎", "user_anoncon"),
-                };
-                    var row2 = new[]
-                    {
-                    InlineKeyboardButton.WithCallbackData("Anon message📩", "user_anonmes")
-                };
-                    var row3 = new[]
-                    {
-                    InlineKeyboardButton.WithCallbackData("Anon spam📈", "user_anonspam")
-                };
-
-                    var keyboard = new InlineKeyboardMarkup(new[] { row1, row2, row3 });
-                    await bot.SendMessage(chatId, "You have ended the conversation", replyMarkup: keyboard);
+                    foundCompanionChatId = _waitingForCompanion.Dequeue();
+                                                                         
+                    _states.TryGetValue(foundCompanionChatId.Value, out foundCompanionState);
+                    foundPair = true;
                 }
                 else
                 {
-                    await bot.SendMessage(chatId, "There are no pending conversations now");
+                    _waitingForCompanion.Enqueue(searchingChatId);
+                    searchingState.isLookingCon = true; 
+                    Console.WriteLine($"User {searchingChatId} ({searchingState.UserName}) is now waiting for a companion.");
                 }
-            }
-            else if(text == "/stop")
+            } 
+
+            if (foundPair)
             {
-                var row1 = new[]
-                    {
-                    InlineKeyboardButton.WithCallbackData("Anon conversation🔎", "user_anoncon"),
-                };
-                var row2 = new[]
+                if (foundCompanionState == null)
                 {
-                    InlineKeyboardButton.WithCallbackData("Anon message📩", "user_anonmes")
-                };
-                var row3 = new[]
-                {
-                    InlineKeyboardButton.WithCallbackData("Anon spam📈", "user_anonspam")
-                };
+                    Console.WriteLine($"Ошибка: UserState для {foundCompanionChatId} не найден, возвращаем {searchingChatId} в очередь.");
+                    lock (_queueLock) { _waitingForCompanion.Enqueue(searchingChatId); }
+                    await bot.SendMessage(searchingChatId, "Error. Try again");
+                    return;
+                }
 
-                var keyboard = new InlineKeyboardMarkup(new[] { row1, row2, row3 });
-                state.isSpamming = false;
-                await bot.SendMessage(chatId, "You have just stopped the spamming", replyMarkup: keyboard);
+                searchingState.isLookingCon = false;
+                searchingState.isChating = true;
+                searchingState.CompanionId = foundCompanionChatId.Value;
+
+                foundCompanionState.isLookingCon = false;
+                foundCompanionState.isChating = true;
+                foundCompanionState.CompanionId = searchingChatId;
+
+                Console.WriteLine($"Found companion! {searchingChatId} ({searchingState.UserName}) <-> {foundCompanionChatId} ({foundCompanionState.UserName})");
+
+                await bot.SendMessage(searchingChatId,
+                    $"Companion found!\n" +
+                    "/leave to leave",
+                    replyMarkup: new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Leave", "leave_chat_button")));
+
+                await bot.SendMessage(foundCompanionChatId.Value,
+                    $"Companion found!\n" +
+                    "/leave to leave",
+                    replyMarkup: new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Leave", "leave_chat_button")));
+            }
+            else 
+            {
+                await bot.SendMessage(searchingChatId, "We are looking for a companion");
+            }
+        }
+
+
+        private async Task LeaveConversationAsync(long leavingChatId, UserState leavingState)
+        {
+            if (!leavingState.isChating)
+            {
+                await bot.SendMessage(leavingChatId, "You are not in a conversation", replyMarkup: keyboard);
+                return;
             }
 
-                bool sent = false;
+            long companionChatId = leavingState.CompanionId;
+            UserState companionState = null;
+            _states.TryGetValue(companionChatId, out companionState);
+
+            leavingState.isChating = false;
+            leavingState.CompanionId = 0; 
+
+            await bot.SendMessage(leavingChatId, "You left the conversation", replyMarkup: keyboard); 
+
+            if (companionState != null && companionState.isChating && companionState.CompanionId == leavingChatId)
+            {
+                companionState.isChating = false;
+                companionState.CompanionId = 0;
+                await bot.SendMessage(companionChatId, "Your companion has just left the conversation", replyMarkup: keyboard); 
+            }
+            else if (companionState != null)
+            {
+                await bot.SendMessage(leavingChatId, "Your companion probably already left the conversation");
+            }
+        }
+
+
+        private async Task DialogHandler(long chatId, Message message, UserState state)
+        {
+            var text = message.Text;
+            bool sent = false;
 
             if (state.Step == 1) //is waiting for Username to get ID 
             {
@@ -262,7 +370,11 @@ namespace Vokson2
 
                 if(state.isFirst)
                 {
-                    await bot.SendMessage(state.IdToMessage, "*👀Someone is writing you a message...*", parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                    await bot.SendMessage(state.IdToMessage,
+                        "*👀Someone is writing you a message...*", 
+                        replyMarkup: new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("Answer", "user_answer")), 
+                        parseMode: Telegram.Bot.Types.Enums.ParseMode.Markdown);
+                   
                     state.isFirst = false;
                 }
 
@@ -300,7 +412,7 @@ namespace Vokson2
                 state.Step++; // = 4
             }
 
-            else if(state.Step == 4)
+            else if(state.Step == 4) //is waiting for spam text
             {
                 if(text != null)
                 {
@@ -321,9 +433,12 @@ namespace Vokson2
     {
         public bool isAdmin { get; set; }
         public string? UserName { get; set; }
+        public long Id { get; set; }
 
 
         public bool isWritingSupport { get; set; }
+
+
         public bool inDialog { get; set; }
         public int Step { get; set; } // 1 - is waiting for the Username to send anon message;
                                       // 2 - is waiting for the text to send;
@@ -340,5 +455,11 @@ namespace Vokson2
         public string? UsernameToSpam { get; set; }
         public string? TextToSpam { get; set; }
         public bool isSpamming { get; set; }
+
+
+        public bool isLookingCon { get; set; }
+       
+        public long CompanionId { get; set; }
+        public bool isChating {  get; set; }
     }
 }
